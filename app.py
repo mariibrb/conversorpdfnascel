@@ -2,25 +2,22 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import io
-import re
 
-def limpar_texto(texto):
-    if texto:
-        return str(texto).replace('\n', ' ').strip()
-    return ""
-
-def converter_valor(valor_str):
+def limpar_e_converter(valor_str):
+    """Limpa caracteres especiais e converte para float para cálculos fiscais."""
     if not valor_str:
         return 0.0
-    # Remove \n, R$, espaços e ajusta vírgula para ponto
-    limpo = str(valor_str).replace('\n', '').replace('R$', '').replace('.', '').replace(',', '.').strip()
+    # Remove quebras de linha, R$, pontos de milhar e ajusta a vírgula decimal
+    limpo = str(valor_str).replace('\n', '').replace('R$', '').replace(' ', '')
+    limpo = limpo.replace('.', '').replace(',', '.')
     try:
         return float(limpo)
     except:
         return 0.0
 
-def extrair_dados_fiscal(pdf_file):
-    dados_completos = []
+def extrair_dados_pdf(pdf_file):
+    dados_finais = []
+    # Colunas baseadas exatamente no cabeçalho do seu documento
     colunas = ["Emissão", "Série", "Número", "Situação", "Chave de acesso", "CFOP", "Valor (R$)"]
     
     with pdfplumber.open(pdf_file) as pdf:
@@ -28,50 +25,49 @@ def extrair_dados_fiscal(pdf_file):
             tabela = pagina.extract_table()
             if tabela:
                 for linha in tabela:
-                    # Filtra para pegar apenas linhas que parecem conter dados (ex: série ou número preenchido)
+                    # Ignora linhas vazias ou o próprio cabeçalho que se repete nas páginas
                     if linha[0] and "Emissão" not in linha[0]:
-                        linha_limpa = [limpar_texto(celula) for celula in linha]
-                        # Tratamento específico para a coluna de Valor (índice 6)
-                        if len(linha_limpa) >= 7:
-                            linha_limpa[6] = converter_valor(linha[6])
-                        dados_completos.append(linha_limpa)
+                        # Limpa quebras de linha de todas as colunas
+                        linha_tratada = [str(c).replace('\n', ' ').strip() for c in linha]
+                        
+                        # Converte a coluna de valor (índice 6) para número real
+                        if len(linha_tratada) >= 7:
+                            linha_tratada[6] = limpar_e_converter(linha[6])
+                        
+                        dados_finais.append(linha_tratada)
     
-    return pd.DataFrame(dados_completos, columns=colunas)
+    return pd.DataFrame(dados_finais, columns=colunas)
 
-def main():
-    st.set_page_config(page_title="Auditoria Fiscal - PDF para Excel", layout="wide")
-    st.title("📑 Conversor de Notas Fiscais para Auditoria")
-    
-    arquivo = st.file_uploader("Suba seu PDF de Entradas e Saídas", type="pdf")
-    
-    if arquivo:
-        df = extrair_dados_fiscal(arquivo)
+# Interface Streamlit
+st.set_page_config(page_title="Conversor Fiscal Bruneli's", layout="wide")
+st.title("📑 Auditoria Fiscal: PDF para Excel")
+
+upload = st.file_uploader("Arraste o relatório de Entradas e Saídas (PDF) aqui", type="pdf")
+
+if upload:
+    with st.spinner("Extraindo dados e convertendo valores..."):
+        df = extrair_dados_pdf(upload)
         
         if not df.empty:
-            st.subheader("Visualização dos Dados Extraídos")
+            st.success(f"Sucesso! {len(df)} notas fiscais encontradas.")
+            
+            # Cálculo de conferência
+            valor_total_pdf = df["Valor (R$)"].sum()
+            st.metric("Soma Total das Notas (Conferência)", f"R$ {valor_total_pdf:,.2f}")
+            
+            # Exibição da tabela
             st.dataframe(df, use_container_width=True)
             
-            # Resumo para conferência rápida
-            total_pdf = df["Valor (R$)"].sum()
-            qtd_notas = len(df)
-            
-            col1, col2 = st.columns(2)
-            col1.metric("Quantidade de Notas", qtd_notas)
-            col2.metric("Valor Total Acumulado", f"R$ {total_pdf:,.2f}")
-
-            # Botão de Exportação
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name='Auditoria')
+            # Geração do Excel
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Relatorio_Fiscal')
             
             st.download_button(
-                label="📥 Baixar Excel para Comparar com Sistema",
-                data=output.getvalue(),
-                file_name="auditoria_fiscal.xlsx",
+                label="📥 Baixar Excel para Auditoria",
+                data=buffer.getvalue(),
+                file_name="relatorio_fiscal_convertido.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-            
-            st.warning("💡 Dica: Verifique se o valor total acima bate com o rodapé do seu PDF. Se houver diferença, cheque as notas com situação 'Cancelada' ou 'Inutilizada'.")
-
-if __name__ == "__main__":
-    main()
+        else:
+            st.error("Não foi possível extrair dados deste PDF. Verifique o formato.")
